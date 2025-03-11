@@ -2,7 +2,7 @@
 #
 # A quick script to deploy 3x-ui in Docker with local NGINX and Certbot.
 # Example usage:
-#   ./setup_3xui.sh liquorice-head.xyz [8443]
+#   ./setup_3xui.sh <your-domain> [8443]
 # By default, HTTPS will listen on 8443 if the second argument is not provided.
 
 ### 0. Check input
@@ -156,5 +156,5 @@ echo
 echo "3x-ui is running in 'network_mode: host' and listening on port 443 on the host."
 echo "You can manage it with docker-compose commands: docker-compose logs, docker-compose restart, etc."
 echo
-echo "Check access at:  http://$DOMAIN  -> redirect https://$DOMAIN:$HTTPS_PORT"
+echo "Check access at:  http://$DOMAIN:2053/ "
 echo "=========================================="
