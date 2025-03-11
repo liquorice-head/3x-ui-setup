@@ -1,5 +1,3 @@
-# setup_3xui_README.md
-
 # **setup_3xui.sh** Script
 
 This script is designed for **quick deployment** of [3x-ui](https://github.com/mhsanaei/3x-ui) in Docker along with a local NGINX and a Let’s Encrypt certificate on an Ubuntu/Debian server.
@@ -24,18 +22,18 @@ This script is designed for **quick deployment** of [3x-ui](https://github.com/m
    chmod +x setup_3xui.sh
    ```
 3. Run it, providing your domain and (optionally) the HTTPS port:
-       ```bash
+   ```bash
    ./setup_3xui.sh <your-domain> [https-port]
    ```
    If you don’t specify a port, 8443 will be used by default.
 
 ## Results
-	•	A temporary NGINX config for Let’s Encrypt validation will be created in /etc/nginx/sites-available/<domain>, followed by the final proxy config.
-	•	The certificate and key will be located at /etc/letsencrypt/live/<domain>.
-	•	A docker-compose.yml file will appear in the current directory, configured for 3x-ui with the required volumes and network_mode: host.
-	•	The script will automatically start the 3x-ui container and enable Docker to start on boot.
+•	A temporary NGINX config for Let’s Encrypt validation will be created in /etc/nginx/sites-available/<domain>, followed by the final proxy config.
+•	The certificate and key will be located at /etc/letsencrypt/live/<domain>.
+•	A docker-compose.yml file will appear in the current directory, configured for 3x-ui with the required volumes and network_mode: host.
+•	The script will automatically start the 3x-ui container and enable Docker to start on boot.
 
 Important Points
-	•	If you want to use the standard HTTPS port 443 in NGINX, adjust the script and/or move 3x-ui to a different port to avoid conflicts.
-	•	Make sure your firewall (UFW, iptables) does not block the required ports.
-	•	Certbot automatically creates cron jobs for certificate renewal. Check that they are functioning as intended.
+•	If you want to use the standard HTTPS port 443 in NGINX, adjust the script and/or move 3x-ui to a different port to avoid conflicts.
+•	Make sure your firewall (UFW, iptables) does not block the required ports.
+•	Certbot automatically creates cron jobs for certificate renewal. Check that they are functioning as intended.
