@@ -37,7 +37,7 @@ This script is designed for **quick deployment** of [3x-ui](https://github.com/m
 - A `docker-compose.yml` file will appear in the current directory, configured for 3x-ui with the required volumes and `network_mode: host`.
 - The script will automatically start the 3x-ui container and enable Docker to start on boot.
 
-Important Points
+## Important Points
 
 - If you want to use the standard HTTPS port 443 in NGINX, adjust the script and/or move 3x-ui to a different port to avoid conflicts.
 - Make sure your firewall (UFW, iptables) does not block the required ports.
