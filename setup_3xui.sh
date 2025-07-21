@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#
-# A quick script to deploy 3x-ui in Docker with local NGINX and Certbot.
-# Example usage:
+
+# A script to deploy 3x-ui in Docker with local NGINX and Certbot.
+# Usage:
 #   ./setup_3xui.sh <your-domain> [8443]
-# By default, HTTPS will listen on 8443 if the second argument is not provided.
+
+set -e
 
 ### 0. Check input
-
 DOMAIN="$1"
 HTTPS_PORT="$2"
 
@@ -24,19 +24,34 @@ echo "HTTPS port: $HTTPS_PORT"
 
 ### 1. Install required packages
 
-echo ">>> Installing Docker, Docker Compose, NGINX, Certbot..."
-sudo apt update -y
-sudo apt install -y docker.io docker-compose nginx certbot python3-certbot-nginx
+echo ">>> Installing Docker, Docker Compose Plugin, NGINX, Certbot..."
 
-# Enable and start Docker
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo systemctl enable nginx
-sudo systemctl start nginx
+# Add Docker repository if not already present
+if ! command -v docker >/dev/null; then
+  sudo apt update -y
+  sudo apt install -y ca-certificates curl gnupg lsb-release
 
-### 2. Create a minimal NGINX config on port 80 (for obtaining the certificate)
+  sudo install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-echo ">>> Creating a minimal NGINX config for Let’s Encrypt..."
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+    https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+  sudo apt update -y
+fi
+
+sudo apt install -y docker.io docker-compose-plugin nginx certbot python3-certbot-nginx
+
+# Enable services
+sudo systemctl enable --now docker
+sudo systemctl enable --now nginx
+
+### 2. Create temporary NGINX config (port 80 for ACME)
+
+echo ">>> Creating temporary NGINX config for Let’s Encrypt..."
 
 NGINX_CONF_PATH="/etc/nginx/sites-available/$DOMAIN"
 
@@ -45,12 +60,10 @@ server {
     listen 80;
     server_name $DOMAIN;
 
-    # Directory for Let’s Encrypt validation (acme-challenge)
     location /.well-known/acme-challenge/ {
         root /var/www/$DOMAIN;
     }
 
-    # For all other paths, return a simple response (not to interfere with validation).
     location / {
         return 200 "Temporary config for ACME challenge on $DOMAIN";
     }
@@ -59,38 +72,35 @@ EOF
 
 sudo mkdir -p /var/www/$DOMAIN
 sudo chown -R www-data:www-data /var/www/$DOMAIN
-
-# Enable the site
 sudo ln -s /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN 2>/dev/null || true
 
 echo ">>> Restarting NGINX..."
 sudo nginx -t && sudo systemctl restart nginx
 
-### 3. Obtain Let’s Encrypt certificate
+### 3. Obtain Let's Encrypt cert
 
 echo ">>> Running certbot to obtain the certificate..."
 sudo certbot certonly --nginx -d "$DOMAIN" --agree-tos --no-eff-email --email "admin@$DOMAIN" || {
-  echo "ERROR: certbot could not obtain the certificate. Check logs and DNS correctness!"
+  echo "ERROR: certbot could not obtain the certificate."
   exit 1
 }
 
 SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-# Check if certificate files exist
 if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
-  echo "ERROR: certificate or key not found: $SSL_CERT / $SSL_KEY"
+  echo "ERROR: certificate or key not found."
   exit 1
 fi
 
-### 4. Create the final NGINX config
+### 4. Create final NGINX config with HTTPS
 
-echo ">>> Creating the final NGINX config with HTTPS proxy..."
+echo ">>> Creating final NGINX config..."
+
 sudo bash -c "cat > $NGINX_CONF_PATH" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
-    # Redirect HTTP to HTTPS (explicitly include :$HTTPS_PORT for custom port)
     return 301 https://\$host:$HTTPS_PORT\$request_uri;
 }
 
@@ -103,7 +113,6 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
-    # Forward all traffic to localhost:443 (where 3x-ui will be listening in Docker)
     location / {
         proxy_pass http://localhost:443;
         proxy_http_version 1.1;
@@ -142,19 +151,20 @@ EOF
 
 ### 6. Launch 3x-ui
 
-echo ">>> Launching the 3x-ui container..."
-sudo docker-compose up -d
+echo ">>> Launching 3x-ui container..."
+sudo docker compose up -d
+
+### 7. Done
 
 echo
 echo "=========================================="
 echo "Setup complete!"
 echo "Domain: $DOMAIN"
 echo "NGINX listens on:"
-echo " - HTTP on 80 (redirect to HTTPS)"
-echo " - HTTPS on port $HTTPS_PORT (proxy to 3x-ui:443)"
+echo " - HTTP 80 → redirect to HTTPS"
+echo " - HTTPS $HTTPS_PORT → proxy to 3x-ui (port 443)"
 echo
-echo "3x-ui is running in 'network_mode: host' and listening on port 443 on the host."
-echo "You can manage it with docker-compose commands: docker-compose logs, docker-compose restart, etc."
-echo
-echo "Check access at:  http://$DOMAIN:2053/ "
+echo "3x-ui is running in 'network_mode: host' and listening on port 443"
+echo "You can manage it via: docker compose logs, docker compose restart, etc."
+echo "Check access at: https://$DOMAIN:$HTTPS_PORT/"
 echo "=========================================="
