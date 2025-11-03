@@ -1,226 +1,170 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-# Defaults
-TLS_PORT="8443"
-DOMAIN=""
-EMAIL=""
-WORKDIR="/opt/docker"
-SITE_NAME="" # will default to $DOMAIN
-NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
-NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
-LE_LIVE_BASE="/etc/letsencrypt/live"
+# A script to deploy 3x-ui in Docker with local NGINX and Certbot.
+# Usage:
+#   ./setup_3xui.sh <your-domain> [8443]
 
-# --------------- helpers ---------------
-log() { echo -e ">>> $*"; }
-die() { echo "ERROR: $*" >&2; exit 1; }
+set -e
 
-require_root() {
-  if [[ "$(id -u)" -ne 0 ]]; then
-    die "Run as root."
-  fi
-}
+### 0. Check input
+DOMAIN="$1"
+HTTPS_PORT="$2"
 
-check_bin() {
-  command -v "$1" >/dev/null 2>&1
-}
+if [ -z "$DOMAIN" ]; then
+  echo "Usage: $0 <domain> [<https-port>]"
+  exit 1
+fi
 
-ensure_pkg() {
-  local pkg="$1"
-  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-    log "Installing package: $pkg"
-    apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"
-  fi
-}
+if [ -z "$HTTPS_PORT" ]; then
+  HTTPS_PORT=8443
+fi
 
-parse_args() {
-  while getopts ":d:e:p:" opt; do
-    case "$opt" in
-      d) DOMAIN="$OPTARG" ;;
-      e) EMAIL="$OPTARG" ;;
-      p) TLS_PORT="$OPTARG" ;;
-      *) die "Unknown option. Usage: -d <domain> -e <email> [-p <tls_port>]" ;;
-    esac
-  done
+echo "Domain to configure: $DOMAIN"
+echo "HTTPS port: $HTTPS_PORT"
 
-  [[ -z "$DOMAIN" ]] && die "Domain is required. Use -d <domain>"
-  [[ -z "$EMAIL" ]] && die "Email is required. Use -e <email>"
-  SITE_NAME="${DOMAIN}"
-}
+### 1. Install required packages
 
-# --------------- main steps ---------------
-install_deps() {
-  log "Checking dependencies..."
-  ensure_pkg ca-certificates
-  ensure_pkg curl
-  ensure_pkg gnupg
-  ensure_pkg lsb-release
-  ensure_pkg software-properties-common
+echo ">>> Installing Docker, Docker Compose Plugin, NGINX, Certbot..."
 
-  # NGINX
-  if ! check_bin nginx; then
-    log "Installing nginx..."
-    apt-get update -y
-    apt-get install -y nginx
-    systemctl enable nginx
-  fi
+# Add Docker repository if not already present
+if ! command -v docker >/dev/null; then
+  sudo apt update -y
+  sudo apt install -y ca-certificates curl gnupg lsb-release
 
-  # Docker + compose v2
-  if ! check_bin docker; then
-    log "Installing Docker..."
-    apt-get update -y
-    apt-get install -y docker.io
-    systemctl enable --now docker
-  fi
+  sudo install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-  if ! docker compose version >/dev/null 2>&1; then
-    log "Installing docker compose v2..."
-    apt-get update -y
-    apt-get install -y docker-compose-plugin
-  fi
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+    https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-  # Certbot
-  if ! check_bin certbot; then
-    log "Installing certbot..."
-    apt-get update -y
-    apt-get install -y certbot
-  fi
-}
+  sudo apt update -y
+fi
 
-obtain_cert() {
-  # Stop nginx to free :80 for standalone challenge
-  log "Obtaining/renewing certificate for ${DOMAIN} via certbot (standalone)..."
-  systemctl stop nginx || true
+sudo apt install -y docker.io docker-compose-plugin nginx certbot python3-certbot-nginx
 
-  certbot certonly --standalone \
-    --non-interactive --agree-tos \
-    --email "${EMAIL}" \
-    -d "${DOMAIN}" || {
-      systemctl start nginx || true
-      die "Certbot failed. Check DNS (A/AAAA must point to this server) and firewall for port 80."
-    }
+# Enable services
+sudo systemctl enable --now docker
+sudo systemctl enable --now nginx
 
-  systemctl start nginx
-}
+### 2. Create temporary NGINX config (port 80 for ACME)
 
-write_nginx_vhost() {
-  log "Writing NGINX vhost for ${DOMAIN} (TLS on ${TLS_PORT})..."
+echo ">>> Creating temporary NGINX config for Let’s Encrypt..."
 
-  mkdir -p "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}"
-  local vhost_path="${NGINX_SITES_AVAILABLE}/${SITE_NAME}"
+NGINX_CONF_PATH="/etc/nginx/sites-available/$DOMAIN"
 
-  cat > "${vhost_path}" <<NGINX
+sudo bash -c "cat > $NGINX_CONF_PATH" <<EOF
 server {
     listen 80;
-    server_name ${DOMAIN};
-    return 301 https://\$host:${TLS_PORT}\$request_uri;
+    server_name $DOMAIN;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/$DOMAIN;
+    }
+
+    location / {
+        return 200 "Temporary config for ACME challenge on $DOMAIN";
+    }
+}
+EOF
+
+sudo mkdir -p /var/www/$DOMAIN
+sudo chown -R www-data:www-data /var/www/$DOMAIN
+sudo ln -s /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN 2>/dev/null || true
+
+echo ">>> Restarting NGINX..."
+sudo nginx -t && sudo systemctl restart nginx
+
+### 3. Obtain Let's Encrypt cert
+
+echo ">>> Running certbot to obtain the certificate..."
+sudo certbot certonly --nginx -d "$DOMAIN" --agree-tos --no-eff-email --email "admin@$DOMAIN" || {
+  echo "ERROR: certbot could not obtain the certificate."
+  exit 1
+}
+
+SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+
+if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+  echo "ERROR: certificate or key not found."
+  exit 1
+fi
+
+### 4. Create final NGINX config with HTTPS
+
+echo ">>> Creating final NGINX config..."
+
+sudo bash -c "cat > $NGINX_CONF_PATH" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host:$HTTPS_PORT\$request_uri;
 }
 
 server {
-    listen ${TLS_PORT} ssl;
-    server_name ${DOMAIN};
+    listen $HTTPS_PORT ssl;
+    server_name $DOMAIN;
 
-    ssl_certificate     ${LE_LIVE_BASE}/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key ${LE_LIVE_BASE}/${DOMAIN}/privkey.pem;
+    ssl_certificate     $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
-    # Increase headers/body limits for client configs
-    client_max_body_size 50m;
-
     location / {
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header Range \$http_range;
-        proxy_set_header If-Range \$http_if_range;
+        proxy_pass http://localhost:443;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_redirect off;
-
-        # 3x-ui web panel listens HTTP on 2053
-        proxy_pass http://127.0.0.1:2053;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
-NGINX
+EOF
 
-  ln -sf "${vhost_path}" "${NGINX_SITES_ENABLED}/${SITE_NAME}"
+echo ">>> Restarting NGINX..."
+sudo nginx -t && sudo systemctl restart nginx
 
-  nginx -t
-  systemctl reload nginx
-  log "NGINX vhost applied."
-}
+### 5. Create docker-compose.yml for 3x-ui
 
-prepare_workdir() {
-  mkdir -p "${WORKDIR}/db" "${WORKDIR}/cert"
-}
-
-write_compose() {
-  log "Writing docker-compose.yml..."
-
-  cat > "${WORKDIR}/docker-compose.yml" <<'YAML'
+echo ">>> Creating docker-compose.yml..."
+cat > docker-compose.yml <<EOF
 services:
   3x-ui:
     image: ghcr.io/mhsanaei/3x-ui:latest
     container_name: 3x-ui
-    # Use host networking so x-ui listens directly on host ports (2053, 2096, etc.)
-    network_mode: host
-    hostname: __DOMAIN_PLACEHOLDER__
-    tty: true
-    restart: unless-stopped
+    hostname: $DOMAIN
+    volumes:
+      - \${PWD}/db/:/etc/x-ui/
+      - \${PWD}/cert/:/root/cert/
+      - /etc/letsencrypt/:/etc/letsencrypt/:rw
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
-    volumes:
-      - ${PWD}/db/:/etc/x-ui/
-      - ${PWD}/cert/:/root/cert/
-      - /etc/letsencrypt/:/etc/letsencrypt/:rw
-YAML
+    tty: true
+    network_mode: host
+    restart: unless-stopped
+EOF
 
-  # Replace placeholder with the actual domain
-  sed -i "s/__DOMAIN_PLACEHOLDER__/${DOMAIN}/g" "${WORKDIR}/docker-compose.yml"
-}
+### 6. Launch 3x-ui
 
-launch_stack() {
-  log "Launching 3x-ui container..."
-  pushd "${WORKDIR}" >/dev/null
-  docker compose pull
-  docker compose up -d
-  popd >/dev/null
-}
+echo ">>> Launching 3x-ui container..."
+sudo docker compose up -d
 
-final_status() {
-  log "Setup complete!"
-  echo "=========================================="
-  echo "Domain: ${DOMAIN}"
-  echo "NGINX listens on:"
-  echo " - HTTP 80 -> redirect to HTTPS"
-  echo " - HTTPS ${TLS_PORT} -> proxy to 3x-ui (HTTP 2053)"
-  echo
-  echo "3x-ui is running in 'network_mode: host' and its web panel listens on port 2053 (HTTP)."
-  echo "TLS is terminated by NGINX on port ${TLS_PORT}."
-  echo
-  echo "Manage with: cd ${WORKDIR} && docker compose logs|restart|down|up -d"
-  echo "Check access at: https://${DOMAIN}:${TLS_PORT}/"
-  echo "=========================================="
-}
+### 7. Done
 
-# --------------- run ---------------
-require_root
-parse_args "$@"
-install_deps
-prepare_workdir
-
-# If certificate not present, obtain it. If present, skip issuance and just use it.
-if [[ ! -f "${LE_LIVE_BASE}/${DOMAIN}/fullchain.pem" ]]; then
-  obtain_cert
-else
-  log "Existing certificate found at ${LE_LIVE_BASE}/${DOMAIN}. Skipping issuance."
-fi
-
-write_nginx_vhost
-write_compose
-launch_stack
-final_status
+echo
+echo "=========================================="
+echo "Setup complete!"
+echo "Domain: $DOMAIN"
+echo "NGINX listens on:"
+echo " - HTTP 80 → redirect to HTTPS"
+echo " - HTTPS $HTTPS_PORT → proxy to 3x-ui (port 443)"
+echo
+echo "3x-ui is running in 'network_mode: host' and listening on port 443"
+echo "You can manage it via: docker compose logs, docker compose restart, etc."
+echo "Check access at: https://$DOMAIN:$HTTPS_PORT/"
+echo "=========================================="
